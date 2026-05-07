@@ -1,0 +1,428 @@
+---
+title: "Classification Part (vowel)"
+author: "Andrei Kostin"
+output: 
+  pdf_document:
+    #toc: true # Add table of contents
+    #number_sections: true # Number sections
+    latex_engine: xelatex
+---
+
+  Load the required libraries:
+
+```{r}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(caret)
+library(class)
+library(ggthemes)
+library(corrplot)
+library(MASS)
+```
+
+  Read the target dataset and name the columns. Variables F0–F9 represent acoustic formants and "Class" is the vowel to predict.
+
+```{r}
+df <- read.csv("../data/vowel.dat", 
+               comment.char="@", header = FALSE)
+
+names(df) <- c("TT", "SpeakerNumber", "Sex",
+               "F0","F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", 
+               "Class")
+head(df)
+```
+
+  Convert numeric variables to categorical type:
+
+```{r}
+df$TT <- factor(df$TT)
+df$SpeakerNumber <- factor(df$SpeakerNumber)
+df$Sex <- factor(df$Sex)
+# Recollapse Sex levels
+df$Sex <- fct_collapse(df$Sex, 
+             male = "0",
+             female = "1")
+df$Class <- factor(df$Class)
+
+glimpse(df) # data structure
+```
+  ## 1. Classification with k-NN
+  
+  Normalize data for distance calculation:
+
+```{r}
+prepr <- preProcess(df[,4:13], method = "range")
+df_scaled <- predict(prepr, df)
+head(df_scaled)
+
+```
+
+  Define a function to train and evaluate k-NN on train/test files:
+
+```{r}
+# about return_data: if TRUE, also returns scaled data and predictions
+# for plotting
+run_knn_fold <- function(i, k = 5, tt = "test", return_data = FALSE) {
+file <- paste0("../data/vowel-10-", i, "tra.dat") 
+x_tra <- read.csv(file, comment.char="@", header=FALSE)
+file <- paste0("../data/vowel-10-", i, "tst.dat") 
+x_tst <- read.csv(file, comment.char="@", header=FALSE)
+names(x_tra) <- c("TT", "SpeakerNumber", "Sex",
+                  "F0","F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", 
+                  "Class")
+names(x_tst) <- names(x_tra)
+
+x_tra$Class <- factor(x_tra$Class)
+x_tst$Class <- factor(x_tst$Class)
+
+# Normalize F0–F9
+prepr <- preProcess(x_tra[,4:13], method = "range")
+x_tra_scaled <- predict(prepr, x_tra[,4:13])
+x_tst_scaled <- predict(prepr, x_tst[,4:13])
+
+# Choose whether to evaluate on train or test
+if (tt == "train") { 
+  x_test <- x_tra_scaled
+  y_test <- x_tra$Class
+  }
+else { 
+  x_test <- x_tst_scaled 
+  y_test <- x_tst$Class
+  }
+
+# Apply k-NN with scaled training data
+knn.pred <- knn(x_tra_scaled, x_test, cl = x_tra$Class, k = k)
+
+
+if (return_data){
+  # Return both data and predictions for visualization
+  val <- cbind(x_test, Class = y_test)
+  list(data = val, pred = knn.pred)
+  } else {
+    # Calculate and return accuracy on the chosen set
+    t <- table(knn.pred, y_test)
+    #print(t)
+    sum(diag(t)) / length(y_test)
+  }
+
+
+}
+
+```
+
+For example, use this function to calculate k-NN accuracy on test with k = 5 in the first fold:
+
+```{r}
+run_knn_fold(1, k = 5, tt = "test")
+```
+  Calculate the average k-NN accuracy (k = 5) across all folds:
+
+```{r}
+acc_knn_test <- mean(sapply(1:10, run_knn_fold, tt = "test"))
+acc_knn_train <- mean(sapply(1:10, run_knn_fold, tt = "train"))
+res_knn <- data.frame(model = "k-NN",
+                      acc_train = acc_knn_train,
+                      acc_test  = acc_knn_test)
+
+res_knn
+```
+
+  Training accuracy is very high (nearly 1), test accuracy is slightly lower but still high, indicating good performance with slight overfitting.
+  
+  Visualization of k-NN predictions in fold 1: 
+
+```{r}
+res_plot <- run_knn_fold(1, k = 5, tt = "test", return_data = TRUE)
+val <- as.data.frame(res_plot$data)
+knn.pred <- res_plot$pred
+
+# Unify true and predicted class levels to avoid factor issues
+lev <- union(levels(factor(val$Class)), levels(factor(knn.pred)))
+val$Class  <- factor(val$Class,  levels = lev)
+knn.pred <- factor(knn.pred,  levels = lev)
+
+# Prepare a long dataframe for F1 vs F2 plotting
+plot_data <- val %>%
+  mutate(prediction = knn.pred) %>%
+  rename(known = Class) %>%
+  gather(type, value, prediction, known)
+
+ggplot(plot_data) +
+  geom_point(aes(x = F1, y = F2, shape = type, color = value)) +
+  labs(x = "Formant F1", y = "Formant F2" , 
+       title = "F1 vs F2 (true values and predictions)") +
+  scale_shape_manual(values = c(5, 3)) + 
+  theme_minimal()
+```
+  This plot shows test points in the F1-F2 space, where diamonds correspond to true classes and crosses are k-NN predictions.
+  Most crosses fall on diamonds of the same color, confirming high classification accuracy.
+
+  Confusion matrix:
+
+```{r}
+cm <- confusionMatrix(knn.pred, val$Class)
+cm
+```
+  Overall, k-NN achieves high accuracy with sensitivity and specificity close to 1 for most classes. Most errors are concentrated in class 6, which has smaller values compared to other classes.
+
+  Combine all training files into one for robust evaluation and apply k-NN with caret:
+
+```{r}
+all_train <- lapply(1:10, function(i) {
+  f <- paste0("../data/vowel-10-", i, "tra.dat")
+  x <- read.csv(f, comment.char = "@", header = FALSE)
+  names(x) <- c("TT","SpeakerNumber","Sex",
+                "F0","F1","F2","F3","F4","F5","F6","F7","F8","F9",
+                "Class")
+  x
+}) %>% bind_rows()
+
+all_train$Class <- factor(all_train$Class)
+
+suppressWarnings({
+  knn.model <- train(Class ~ .-Class-TT-SpeakerNumber-Sex,
+                     data = all_train,
+                     method="knn", 
+                     metric="Accuracy", 
+                     tuneGrid = expand.grid(.k = 1:15))
+})
+
+knn.model
+```
+  With bootstrap on the combined training set, all k values between 1 and 15 show very high accuracy. This indicates that k-NN fits the available data very well, although this validation is based on resampling of the training set itself and therefore slightly overestimates real performance. The most suitable k values are from k = 2 to k = 5, offering a good compromise between high accuracy and moderate overfitting.
+
+Visualization of the k-NN method:
+
+```{r}
+plot(knn.model)
+```
+
+  Calculate accuracy for different k values:
+
+```{r}
+k <- c(1, 3, 5, 7, 9, 11)
+# For each k, calculate average accuracy on train and test  
+get_acc_for_k <- function(k) {
+  acc_test  <- mean(sapply(1:10, run_knn_fold, k = k, tt = "test"))
+  acc_train <- mean(sapply(1:10, run_knn_fold, k = k, tt = "train"))
+  c(acc_train = acc_train, acc_test = acc_test)
+}
+
+res_mat <- sapply(k, get_acc_for_k)
+
+res_knn <- data.frame(k = k,
+                      acc_train = res_mat["acc_train", ],
+                      acc_test  = res_mat["acc_test", ])
+
+res_knn
+```
+
+  Visualization of the results:
+  
+```{r}
+
+plot_knn <- res_knn %>%
+  gather(test_train, accuracy, acc_train, acc_test)
+
+ggplot(plot_knn, aes(x = k, y = accuracy, color = test_train)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = k) + 
+  labs(x = "k", y = "Mean Accuracy",
+       title = "k-NN accuracy on training and test by k") +
+  theme_minimal()
+```
+  As k increases, both accuracies decrease and the gap between train and test widens. This indicates that small k values give better performance.
+  
+  ## 2. Classification with LDA
+  
+  Define a function analogous to run_knn_fold but for LDA:
+  
+```{r}
+run_lda_fold <- function(i, tt = "test", return_data = FALSE) {
+file <- paste0("../data/vowel-10-", i, "tra.dat") 
+x_tra <- read.csv(file, comment.char="@", header=FALSE)
+file <- paste0("../data/vowel-10-", i, "tst.dat") 
+x_tst <- read.csv(file, comment.char="@", header=FALSE)
+names(x_tra) <- c("TT", "SpeakerNumber", "Sex",
+                  "F0","F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", 
+                  "Class")
+names(x_tst) <- names(x_tra)
+
+x_tra$Class <- factor(x_tra$Class)
+x_tst$Class <- factor(x_tst$Class)
+
+# Fit LDA model using only the training set
+model <- lda(Class ~ .-TT-SpeakerNumber-Sex, data = x_tra)
+
+
+if (tt == "train") { 
+  test <- x_tra
+  }
+else { 
+  test <- x_tst
+  }
+
+  # Get predicted classes and calculate accuracy
+  pred <- predict(model, test)
+  mean(pred$class == test$Class)
+
+}
+
+```
+
+ Calculate average LDA accuracy across all folds:
+
+```{r}
+acc_lda_test <- mean(sapply(1:10, run_lda_fold, tt = "test"))
+acc_lda_train <- mean(sapply(1:10, run_lda_fold, tt = "train"))
+res_lda <- data.frame(model = "LDA",
+                      acc_train = acc_lda_train,
+                      acc_test  = acc_lda_test)
+
+res_lda
+```
+
+  This analysis shows that LDA is a significantly less efficient classifier for the vowel dataset compared to k-NN, which achieves much higher results. There is not much difference between train and test values, so this model is also fairly stable, albeit with lower performance.
+  
+  LD1 and LD2 projection:
+
+```{r}
+lda_model <- lda(Class ~ .-TT-SpeakerNumber-Sex, data = all_train)
+
+lda.data <- cbind(all_train, predict(lda_model)$x)
+
+ggplot(lda.data, aes(x = LD1, y = LD2, color = Class)) +
+  geom_point(alpha = 0.5, size = 1) +
+  labs(title = "LDA projection: LD1 vs LD2") +
+  theme_minimal()
+```
+  The reason for such low accuracy values is the poor data separability that can be observed graphically. The classes overlap heavily in space, resulting in the low LDA precision observed.
+
+  Normality assessment for formants F1 and F2:
+  
+```{r}
+ggplot(all_train, aes(x = F1)) +
+  geom_histogram(bins = 20, color = "black", fill = "steelblue") +
+  facet_wrap(~ Class, ncol = 4) +
+  labs(title = "Histograms of F1 by class")
+```
+```{r}
+ggplot(all_train, aes(x = F2)) +
+  geom_histogram(bins = 20, color = "black", fill = "steelblue") +
+  facet_wrap(~ Class, ncol = 4) +
+  labs(title = "Histograms of F2 by class")
+```
+The histograms are mostly unimodal, though skewed. Multivariate normality holds only approximately. Since the dispersion clearly differs between classes, this violates the classical LDA assumption. 
+
+  ## 3. Classification with QDA
+
+  Define a function analogous to run_knn_fold and run_lda_fold but for QDA:
+
+```{r}
+run_qda_fold <- function(i, tt = "test", return_data = FALSE) {
+file <- paste0("../data/vowel-10-", i, "tra.dat") 
+x_tra <- read.csv(file, comment.char="@", header=FALSE)
+file <- paste0("../data/vowel-10-", i, "tst.dat") 
+x_tst <- read.csv(file, comment.char="@", header=FALSE)
+names(x_tra) <- c("TT", "SpeakerNumber", "Sex",
+                  "F0","F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", 
+                  "Class")
+names(x_tst) <- names(x_tra)
+
+x_tra$Class <- factor(x_tra$Class)
+x_tst$Class <- factor(x_tst$Class)
+
+model <- qda(Class ~ .-TT-SpeakerNumber-Sex, data = x_tra)
+
+
+if (tt == "train") { 
+  test <- x_tra
+  }
+else { 
+  test <- x_tst
+  }
+  
+  pred <- predict(model, test)
+  mean(pred$class == test$Class)
+}
+```
+
+  Calculate average QDA accuracy across all folds:
+
+```{r}
+acc_qda_test <- mean(sapply(1:10, run_qda_fold, tt = "test"))
+acc_qda_train <- mean(sapply(1:10, run_qda_fold, tt = "train"))
+res_qda <- data.frame(model = "QDA",
+                      acc_train = acc_qda_train,
+                      acc_test  = acc_qda_test)
+
+res_qda
+
+```
+  According to the results, QDA shows much better efficiency compared to LDA accuracy, although the method is still more efficient.
+
+  Comparison of formant variances for three representative classes:
+  
+```{r}
+features <- c("F0","F1","F2","F3","F4","F5","F6","F7","F8","F9")
+cov0 <- cov(subset(all_train, Class == 0)[, features])
+cov1 <- cov(subset(all_train, Class == 1)[, features])
+cov2 <- cov(subset(all_train, Class == 2)[, features])
+
+# calculate diagonals of covariance matrices
+var_df <- data.frame(feature = features,
+                     class0  = diag(cov0),
+                     class1  = diag(cov1),
+                     class2  = diag(cov2))
+
+var_long <- var_df %>%
+  pivot_longer(cols = c(class0, class1, class2),
+               names_to = "class",
+               values_to = "variance")
+
+ggplot(var_long, aes(x = feature, y = variance, color = class, group = class)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Variance comparison by class",
+       x = "Formant", y = "Variance") +
+  theme_minimal()
+
+```
+  The plot provides clear evidence that class dispersions are not equal. This explains why LDA showed such poor results.
+  
+  ## 4. Comparison of three algorithms
+  
+  Compare k-NN, LDA, and QDA results in a single dataframe:
+  
+```{r}
+best_k <- 3   # best k for k-NN
+
+# Calculate average k-NN accuracies
+acc_knn_train <- mean(sapply(1:10, run_knn_fold, k = best_k, tt = "train"))
+acc_knn_test  <- mean(sapply(1:10, run_knn_fold, k = best_k, tt = "test"))
+
+res_all <- rbind(
+  data.frame(model = "k-NN", acc_train = acc_knn_train, acc_test = acc_knn_test),
+  data.frame(model = "LDA", acc_train = acc_lda_train, acc_test = acc_lda_test),
+  data.frame(model = "QDA", acc_train = acc_qda_train, acc_test = acc_qda_test)
+)
+
+res_all
+```
+
+  Visualization of this comparison:
+
+```{r}
+ggplot(res_all, aes(x = model, y = acc_test, fill = model)) +
+  geom_col() +
+  ylim(0, 1) +
+  labs(title = "Mean test accuracy by model",
+       x = "Model", y = "Accuracy (test)") +
+  theme_minimal()
+```
+  The analysis clearly shows that for the vowel dataset classification task, **k-NN** is the most efficient model, achieving the highest accuracy. This success is because vowel class boundaries are complex and non-linear. On the other hand, *LDA* performed poorly (60.1% accuracy) because the boundaries are not linear and the variances differ greatly. *QDA* improved accuracy but did not reach k-NN's performance.
+  Consequently, the recommended final model for this task is **k-NN** with **k = 3**.

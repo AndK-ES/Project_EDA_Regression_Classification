@@ -1,0 +1,321 @@
+---
+title: "Regression part (autoMPG6)"
+author: "Andrei Kostin"
+output: 
+  pdf_document:
+    #toc: true # Add table of contents
+    #number_sections: true # Number sections
+    latex_engine: xelatex
+---
+
+  Load the required libraries:
+
+```{r}
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(MASS)
+library(kknn)
+```
+
+  Read the target dataset and name the columns:
+
+```{r}
+df <- read.csv("../data/autoMPG6.dat", 
+               comment.char="@", header = FALSE)
+
+names(df) <- c("Displacement", "Horse_power", "Weight",
+                 "Acceleration", "Model_year", "Mpg")
+head(df) 
+```
+
+## 1. Linear Regression
+
+  Analysis of all variables using quality metrics:
+
+```{r}
+fit_weight  <- lm(Mpg ~ Weight, data = df)
+fit_hp      <- lm(Mpg ~ Horse_power, data = df)
+fit_disp    <- lm(Mpg ~ Displacement, data = df)
+fit_acc     <- lm(Mpg ~ Acceleration, data = df)
+fit_year    <- lm(Mpg ~ Model_year, data = df)
+
+
+simple_stats <- data.frame(var = c("Weight", "Horse_power", "Displacement", 
+                                   "Acceleration", "Model_year"),
+                           r2 = c(summary(fit_weight)$r.squared,
+                                  summary(fit_hp)$r.squared,
+                                  summary(fit_disp)$r.squared,
+                                  summary(fit_acc)$r.squared,
+                                  summary(fit_year)$r.squared),
+                           r2adj = c(summary(fit_weight)$adj.r.squared,
+                                     summary(fit_hp)$adj.r.squared,
+                                     summary(fit_disp)$adj.r.squared,
+                                     summary(fit_acc)$adj.r.squared,
+                                     summary(fit_year)$adj.r.squared),
+                           rmse  = c(sqrt(sum(fit_weight$residuals^2)/length(fit_weight$residuals)),
+                                     sqrt(sum(fit_hp$residuals^2)/length(fit_hp$residuals)),
+                                     sqrt(sum(fit_disp$residuals^2)/length(fit_disp$residuals)),
+                                     sqrt(sum(fit_acc$residuals^2)/length(fit_acc$residuals)),
+                                     sqrt(sum(fit_year$residuals^2)/length(fit_year$residuals)))
+)
+
+simple_stats
+```
+  The results of the five simple linear regressions show that *Weight* is the most informative predictor for *Mpg*, with an adjusted R2 of ~0.69 and the lowest RMSE of ~4.32.
+*Displacement* and *Horse_power* also show strong relationships with *Mpg* (adjusted R2 of 0.65 and 0.60, respectively).
+Therefore, the model *Mpg ~ Weight* is selected as the best simple linear regression model for this dataset.
+
+  Scatterplot visualization of all predictors against Mpg:
+
+```{r}
+df_long <- df %>% pivot_longer(cols = -Mpg, names_to  = "regr", values_to = "values")
+
+ggplot(df_long, aes(x = values, y = Mpg)) +
+  geom_point(alpha = .4, color = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  facet_wrap(~ regr, scales = "free_x") + 
+  labs(title = "Scatterplots Mpg vs predictors", x = "predictors") + 
+  theme_minimal()
+```
+
+  *Weight*, *Displacement*, and *Horse_power* show a strong negative linear relationship with *Mpg*: as these variables increase, *Mpg* decreases almost linearly.
+  In contrast, the relationships of *Mpg* with *Acceleration* and especially *Model_year* are more scattered, making them less explanatory for regression.
+
+## 2. Multiple Linear Regression
+
+  Fit the full regression model with all variables:
+
+```{r}
+fit_all = lm(Mpg~., data = df)
+summary(fit_all)
+```
+  According to the quality metrics, *Weight* and *Model_year* have highly significant coefficients, while *Displacement*, *Horse_power*, and *Acceleration* have high p-values, suggesting they add little additional information.
+  Therefore, we remove variables one by one in order of relevance by p-value:
+
+```{r}
+fit1 = lm(Mpg~.-Horse_power, data = df)
+summary(fit1)
+```
+
+
+```{r}
+fit2 = lm(Mpg~.-Horse_power-Displacement, data = df)
+summary(fit2)
+```
+
+
+```{r}
+fit3 = lm(Mpg~.-Horse_power-Displacement-Acceleration, data = df)
+summary(fit3)
+```
+  The results show a consistent decrease in residual error. The reduced model using only *Weight* and *Model_year* achieves an adjusted R2 of 0.807 and the lowest residual standard error. These variables align with the EDA hypotheses: greater weight decreases *Mpg*, while newer models have more efficient fuel consumption.
+  
+  Check interaction of the most relevant variables:
+  
+```{r}
+fit4 = lm(Mpg~Weight*Model_year, data = df)
+summary(fit4)
+```
+  Quality metrics improve substantially. This indicates that the effect of weight on *Mpg* depends on the model year.
+  
+  Adding non-linearity:
+
+```{r}
+fit5 = lm(Mpg~Weight + I(Weight^2) + Model_year, data = df)
+summary(fit5)
+```
+  After including a quadratic term for *Weight*, the result improves considerably compared to all previous analyses.
+  
+  Combination of the last two steps:
+
+```{r}
+fit6 = lm(Mpg~Weight*Model_year + 
+            Weight + I(Weight^2) + 
+            Model_year + I(Model_year^2), data = df)
+summary(fit6)
+```
+  The best results are obtained by combining interaction and quadratic terms for both *Weight* and *Model_year*. This confirms non-linear relationships and a weight effect that depends on model year.
+  
+  Plot Mpg vs Weight for each model year:
+
+```{r}
+ggplot(df, aes(x = Weight, y = Mpg)) +
+  geom_point(alpha = .5, color = "steelblue") +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  facet_wrap(~ Model_year) +
+  labs(title = "Mpg–Weight relationship by model year") +
+  theme_minimal()
+```
+
+## 3.	k-NN for Non-parametric Regression
+
+  The comparative plots show that **k-NN** predictions follow the global trends of real data reasonably well but underestimate extreme values:
+ 
+```{r}
+fitknn_all <- kknn(Mpg ~ ., df, df, k=7, distance=2, kernel="optimal", scale=TRUE)
+
+df_long <- df %>% mutate(fitted = fitknn_all$fitted.values) %>% 
+  pivot_longer(cols = -c(Mpg,fitted), names_to = "variable", values_to = "value")
+df_long %>% ggplot(aes(x = value)) + 
+  geom_point(aes(y = Mpg), alpha = .5) +
+  geom_point(aes(y = fitted), color = "blue", shape = 20, size = 1.7) +
+  facet_wrap(~ variable, scale="free") + theme_minimal()
+```
+  First, we read the train and test files and apply the linear model to obtain scores:
+
+```{r}
+# K-NN
+
+name <- "autoMPG6"
+run_lm_fold <- function(i, x, tt = "test") {
+file <- paste("../data/", x, "-5-", i, "tra.dat", sep=""); x_tra <- read.csv(file, comment.char="@", header=FALSE)
+file <- paste("../data/", x, "-5-", i, "tst.dat", sep=""); x_tst <- read.csv(file, comment.char="@", header=FALSE)
+names(x_tra) <- c("Displacement", "Horse_power", "Weight",
+                 "Acceleration", "Model_year", "Mpg")
+names(x_tst) <- c("Displacement", "Horse_power", "Weight",
+                 "Acceleration", "Model_year", "Mpg")
+if (tt == "train") { 
+  test <- x_tra 
+  }
+else { 
+  test <- x_tst 
+  }
+fitMulti=lm(Mpg~Weight*Model_year + 
+            Weight + I(Weight^2) + 
+            Model_year + I(Model_year^2), x_tra)
+yprime=predict(fitMulti,test)
+sum(abs(test$Mpg-yprime)^2)/length(yprime) ##MSE
+}
+lmMSEtrain<-mean(sapply(1:5,run_lm_fold,name,"train"))
+lmMSEtest<-mean(sapply(1:5,run_lm_fold,name,"test"))
+cat("LM train score: ", lmMSEtrain, "\n")
+cat("LM test score: ", lmMSEtest, "\n")
+```
+  Next, we run the same procedure with the k-NN model:
+
+```{r}
+library(kknn)
+name <- "autoMPG6"
+run_knn_fold <- function(i, x, tt = "test") {
+file <- paste("../data/", x, "-5-", i, "tra.dat", sep=""); x_tra <- read.csv(file, comment.char="@", header=FALSE)
+file <- paste("../data/", x, "-5-", i, "tst.dat", sep=""); x_tst <- read.csv(file, comment.char="@", header=FALSE)
+names(x_tra) <- c("Displacement", "Horse_power", "Weight",
+                 "Acceleration", "Model_year", "Mpg")
+names(x_tst) <- c("Displacement", "Horse_power", "Weight",
+                 "Acceleration", "Model_year", "Mpg")
+if (tt == "train") { 
+  test <- x_tra 
+  }
+else { 
+  test <- x_tst 
+  }
+fitMulti=kknn(Mpg~Weight*Model_year + 
+            Weight + I(Weight^2) + 
+            Model_year + I(Model_year^2), train = x_tra, test = test)
+yprime=fitMulti$fitted.values
+sum(abs(test$Mpg-yprime)^2)/length(yprime) ##MSE
+}
+knnMSEtrain<-mean(sapply(1:5,run_knn_fold,name,"train"))
+knnMSEtest<-mean(sapply(1:5,run_knn_fold,name,"test"))
+cat("K-NN train score: ", knnMSEtrain, "\n")
+cat("K-NN test score: ", knnMSEtest, "\n")
+```
+  Train and test scores for **Linear Model** and **k-NN**:
+
+```{r}
+data.frame(model_type = c("LM", "k-NN"), 
+           train_score = c(lmMSEtrain, knnMSEtrain),
+           test_score = c(lmMSEtest, knnMSEtest))
+```
+  
+  k-NN achieves much lower training error than multiple linear regression, indicating better fit, but on test partitions its RMSE (8.76) is slightly higher than the linear model (8.56).
+  Therefore, k-NN does not improve predictive performance on new data and shows a slight tendency to overfit compared to linear regression.
+
+## 4.	Comparison of Multiple Regression Algorithms
+
+  Read the CSV files and update LM and k-NN results for the autoMPG6 dataset:
+
+```{r}
+# read train file
+res_train <- read.csv("../data/regr_train_alumnos.csv")
+
+# update results of both models for autoMPG6
+idx <- which(rownames(res_train) == "autoMPG6")  
+res_train[res_train[,1] == "autoMPG6", "out_train_lm"]   <- lmMSEtrain
+res_train[res_train[,1] == "autoMPG6", "out_train_kknn"] <- knnMSEtrain
+write.csv(res_train, "../data/regr_train_alumnos.csv", row.names = FALSE)
+
+tablatra <- as.matrix(res_train[, c("out_train_lm","out_train_kknn","out_train_m5p")])
+colnames(tablatra) <- c("LM","KNN","M5")
+rownames(tablatra) <- res_train[,1]
+
+# same with the test file
+res_test <- read.csv("../data/regr_test_alumnos.csv")
+
+res_test[res_test[,1] == "autoMPG6", "out_test_lm"]   <- lmMSEtest
+res_test[res_test[,1] == "autoMPG6", "out_test_kknn"] <- knnMSEtest
+write.csv(res_test, "../data/regr_test_alumnos.csv", row.names = FALSE)
+
+tablatst <- as.matrix(res_test[, c("out_test_lm","out_test_kknn","out_test_m5p")])
+colnames(tablatst) <- c("LM","KNN","M5")
+rownames(tablatst) <- res_test[,1]
+
+```
+
+  To compare LM and k-NN across all datasets, the Wilcoxon test was applied: 
+
+```{r}
+# Calculate relative difference LM - KNN
+difs <- (tablatst[, "LM"] - tablatst[, "KNN"]) / tablatst[, "LM"]
+
+# Transform data for the Wilcoxon test
+# Create two columns containing negative and positive differences
+wilc_1_2 <- cbind(ifelse(difs < 0, abs(difs) + 0.1, 0 + 0.1), # LM is worse than KNN
+                  ifelse(difs > 0, abs(difs) + 0.1, 0 + 0.1)) # LM is better than KNN
+colnames(wilc_1_2) <- c("LM","KNN")
+
+# Two-sided paired Wilcoxon test LM vs KNN
+LMvsKNNtst <- wilcox.test(wilc_1_2[,1], wilc_1_2[,2],
+                          alternative = "two.sided",
+                          paired = TRUE)
+# Save R+ and p-value from the first run
+Rmas   <- LMvsKNNtst$statistic
+pvalue <- LMvsKNNtst$p.value
+
+# Repeat the test to get the R- statistic
+LMvsKNNtst <- wilcox.test(wilc_1_2[,2], wilc_1_2[,1],
+                          alternative = "two.sided",
+                          paired = TRUE)
+Rmenos <- LMvsKNNtst$statistic
+
+# Display result
+data.frame(R_plus = Rmas, R_minus = Rmenos, p_value = pvalue)
+```
+
+  The p-value obtained is 0.966, so the null hypothesis of equal performance is not rejected. LM and k-NN show no statistically significant differences.
+  
+  Using the Friedman test to simultaneously compare all three algorithms (LM, k-NN, and M5'):
+
+```{r}
+# Run Friedman test
+test_friedman <- friedman.test(as.matrix(tablatst))
+test_friedman
+
+# Prepare pairwise Wilcoxon test with Holm correction
+tam <- dim(tablatst)
+groups <- rep(1:tam[2], each = tam[1])
+
+# Apply Holm post-hoc
+pairwise.wilcox.test(as.matrix(tablatst),groups,p.adjust = "holm",paired  = TRUE)
+```
+  The Friedman test on LM, k-NN, and M5' errors gives a p-value of 0.006 < 0.05, indicating significant differences between at least one pair of algorithms. However, post-hoc analysis using paired Wilcoxon comparisons with Holm correction shows p-values of 0.832 for LM/k-NN and 0.062 for both LM/M5' and k-NN/M5' pairs, so no statistically significant differences between specific pairs are detected.
+  
+  All error results for autoMPG6 by the three algorithms:
+
+```{r}
+tablatst["autoMPG6", ]
+```
+  According to the results, the M5' algorithm achieves slightly lower error than the other two. Therefore, all three algorithms show comparable predictive performance.
